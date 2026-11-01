@@ -131,29 +131,167 @@ app.get("/events/:id", async (req, res) => {
 });
 
 
-
-
 app.post("/events", async (req, res) => {
   try {
-    const newEvent = req.body;
+    const {
+      title,
+      description,
+      eventType,
+      thumbnailUrl,
+      location,
+      eventDate,
+      creatorEmail,
+    } = req.body;
 
+    // Check required fields
+    if (
+      !title ||
+      !description ||
+      !eventType ||
+      !thumbnailUrl ||
+      !location ||
+      !eventDate ||
+      !creatorEmail
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required",
+      });
+    }
+
+    // Validate title
+    if (typeof title !== "string" || title.trim().length < 5 || title.trim().length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Title must be between 5 and 100 characters",
+      });
+    }
+
+    // Validate description
+    if (
+      typeof description !== "string" ||
+      description.trim().length < 20 ||
+      description.trim().length > 2000
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Description must be between 20 and 2000 characters",
+      });
+    }
+
+    // Validate event category
+    const allowedCategories = [
+      "Tree Plantation",
+      "Community Cleanup",
+      "Food Donation",
+      "Education Support",
+      "Blood Donation",
+      "Clothes Distribution",
+      "Community Support",
+      "Health Awareness",
+    ];
+
+    if (!allowedCategories.includes(eventType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event category",
+      });
+    }
+
+    // Validate image URL
+    let imageUrl;
+
+    try {
+      imageUrl = new URL(thumbnailUrl);
+    } catch {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid image URL",
+      });
+    }
+
+    if (imageUrl.protocol !== "https:") {
+      return res.status(400).json({
+        success: false,
+        message: "Image URL must use HTTPS",
+      });
+    }
+
+    // Validate location
+    if (
+      typeof location !== "string" ||
+      location.trim().length < 3 ||
+      location.trim().length > 150
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Location must be between 3 and 150 characters",
+      });
+    }
+
+    // Validate future event date
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Dhaka",
+    });
+
+    if (
+      typeof eventDate !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) ||
+      !Number.isFinite(Date.parse(`${eventDate}T00:00:00Z`)) ||
+      new Date(`${eventDate}T00:00:00Z`).toISOString().slice(0, 10) !== eventDate ||
+      eventDate <= today
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid future event date",
+      });
+    }
+
+    // Validate creator email
+    if (
+      typeof creatorEmail !== "string" ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(creatorEmail)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid creator email",
+      });
+    }
+
+    // Prepare event data
+    const newEvent = {
+      title: title.trim(),
+      description: description.trim(),
+      eventType,
+      thumbnailUrl: thumbnailUrl.trim(),
+      location: location.trim(),
+      eventDate,
+      creatorEmail: creatorEmail.trim().toLowerCase(),
+      createdAt: new Date(),
+    };
+
+    // Insert event into MongoDB
     const result = await eventsCollection.insertOne(newEvent);
 
     res.status(201).json({
       success: true,
       message: "Event created successfully",
-      data: result,
+      data: {
+        _id: result.insertedId,
+        ...newEvent,
+      },
     });
   } catch (error) {
-  console.error("Create event error:", error);
+    console.error("Create event error:", error);
 
-  res.status(500).json({
-    success: false,
-    message: "Failed to create event",
-    error: error.message,
-  });
-}
+    res.status(500).json({
+      success: false,
+      message: "Failed to create event",
+    });
+  }
 });
+
+
 
 app.put("/events/:id", async (req, res) => {
   try {
