@@ -93,6 +93,41 @@ app.get("/upcoming-events", async (req, res) => {
 });
 
 
+app.get("/my-events", async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email || typeof email !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Creator email is required",
+      });
+    }
+
+    const events = await eventsCollection
+      .find({
+        creatorEmail: email.trim().toLowerCase(),
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      message: "My events fetched successfully",
+      data: events,
+    });
+  } catch (error) {
+    console.error("Fetch my events error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch my events",
+    });
+  }
+});
+
+
+
 app.get("/events/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -290,6 +325,7 @@ app.post("/events", async (req, res) => {
     });
   }
 });
+
 
 
 
