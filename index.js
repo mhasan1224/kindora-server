@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import 'dotenv/config';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId  } from 'mongodb';
 
 const PORT = 8000;
 
@@ -71,6 +71,80 @@ app.post("/events", async (req, res) => {
     error: error.message,
   });
 }
+});
+
+app.put("/events/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const updatedEvent = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const result = await eventsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updatedEvent }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Event updated successfully",
+    });
+  } catch (error) {
+    console.error("Update event error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update event",
+    });
+  }
+});
+
+app.delete("/events/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const result = await eventsCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Event deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete event error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete event",
+    });
+  }
 });
 
 async function startServer() {
