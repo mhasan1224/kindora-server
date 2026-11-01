@@ -33,9 +33,20 @@ app.get("/", (req, res) => {
     res.send("Hello Kindora!");
 });
 
+
 app.get("/events", async (req, res) => {
   try {
-    const events = await eventsCollection.find().toArray();
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Dhaka",
+    });
+
+    const events = await eventsCollection
+      .find({
+        eventDate: { $gte: today },
+      })
+      .sort({ eventDate: 1 })
+      .limit(6)
+      .toArray();
 
     res.status(200).json({
       success: true,
@@ -43,12 +54,44 @@ app.get("/events", async (req, res) => {
       data: events,
     });
   } catch (error) {
+    console.error("Fetch events error:", error);
+
     res.status(500).json({
       success: false,
       message: "Failed to fetch events",
     });
   }
 });
+
+
+app.get("/upcoming-events", async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Dhaka",
+    });
+
+    const events = await eventsCollection
+      .find({
+        eventDate: { $gte: today },
+      })
+      .sort({ eventDate: 1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      message: "Upcoming events fetched successfully",
+      data: events,
+    });
+  } catch (error) {
+    console.error("Fetch upcoming events error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch upcoming events",
+    });
+  }
+});
+
 
 
 app.post("/events", async (req, res) => {
