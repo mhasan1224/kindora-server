@@ -4,9 +4,16 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 const PORT = 8000;
 const FRONTEND_URL = "http://localhost:3000";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const UPLOADS_ROOT = path.join(__dirname, "uploads", "avatars");
 
 const app = express();
 
@@ -17,7 +24,21 @@ app.use(
   }),
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "3mb" }));
+
+// Serve uploaded avatars as static files
+app.use(
+  "/uploads/avatars",
+  express.static(UPLOADS_ROOT, {
+    index: false,
+    dotfiles: "deny",
+    fallthrough: true,
+    setHeaders: (res) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+    },
+  }),
+);
 
 // MongoDB Configuration
 const client = new MongoClient(process.env.MONGO_URI);
@@ -25,6 +46,10 @@ const db = client.db("kindora");
 
 const eventsCollection = db.collection("events");
 const participantsCollection = db.collection("eventParticipants");
+
+// Better Auth user records and the avatar ownership index
+const usersCollection = db.collection("user");
+const avatarUploadsCollection = db.collection("avatarUploads");
 
 // Better Auth JWKS
 const JWKS = createRemoteJWKSet(
@@ -209,9 +234,331 @@ const validateEventData = (data, isUpdate = false) => {
   return errors;
 };
 
+// Avatar upload helpers
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_MAX_BASE64_LENGTH = Math.ceil(AVATAR_MAX_BYTES / 3) * 4;
+const AVATAR_DATA_URL_PATTERN =
+  /^data:image\/(png|jpeg|jpg|webp);base64,([A-Za-z0-9+/=]+)$/;
+const AVATAR_FILE_NAME_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|jpg|webp)$/;
+
+// Declared MIME subtype to the extension detected from the file signature
+const AVATAR_DECLARED_TYPES = new Map([
+  ["png", "png"],
+  ["jpeg", "jpg"],
+  ["jpg", "jpg"],
+  ["webp", "webp"],
+]);
+
+const startsWithBytes = (buffer, bytes, offset = 0) => {
+  if (buffer.length < offset + bytes.length) {
+    return false;
+  }
+
+  return bytes.every((byte, index) => buffer[offset + index] === byte);
+};
+
+const detectAvatarExtension = (buffer) => {
+  if (startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return "png";
+  }
+
+  if (startsWithBytes(buffer, [0xff, 0xd8, 0xff])) {
+    return "jpg";
+  }
+
+  if (
+    startsWithBytes(buffer, [0x52, 0x49, 0x46, 0x46]) &&
+    startsWithBytes(buffer, [0x57, 0x45, 0x42, 0x50], 8)
+  ) {
+    return "webp";
+  }
+
+  return null;
+};
+
+const parseAvatarDataUrl = (dataUrl) => {
+  if (typeof dataUrl !== "string") {
+    return null;
+  }
+
+  const match = dataUrl.match(AVATAR_DATA_URL_PATTERN);
+
+  if (!match) {
+    return null;
+  }
+
+  const declaredType = match[1].toLowerCase();
+  const base64Payload = match[2];
+
+  // Reject oversized payloads before decoding them.
+  if (base64Payload.length % 4 !== 0) {
+    return null;
+  }
+
+  if (base64Payload.length > AVATAR_MAX_BASE64_LENGTH) {
+    return null;
+  }
+
+  let buffer;
+
+  try {
+    buffer = Buffer.from(base64Payload, "base64");
+  } catch {
+    return null;
+  }
+
+  // Buffer.from decodes leniently, so re-encode and require a canonical match.
+  if (buffer.toString("base64") !== base64Payload) {
+    return null;
+  }
+
+  if (buffer.length === 0 || buffer.length > AVATAR_MAX_BYTES) {
+    return null;
+  }
+
+  const extension = detectAvatarExtension(buffer);
+
+  if (!extension) {
+    return null;
+  }
+
+  // The declared MIME type must match the real file signature.
+  if (AVATAR_DECLARED_TYPES.get(declaredType) !== extension) {
+    return null;
+  }
+
+  return { buffer, extension };
+};
+
+// Extracts the avatar file name from a URL path. Only an exact
+// "/uploads/avatars/<uuid>.<ext>" path is accepted.
+const getLocalAvatarFileName = (imageUrl) => {
+  if (typeof imageUrl !== "string" || imageUrl.trim() === "") {
+    return null;
+  }
+
+  let pathname;
+
+  try {
+    // The base only resolves root-relative paths; it is never treated as a host.
+    pathname = new URL(imageUrl, "http://localhost").pathname;
+  } catch {
+    return null;
+  }
+
+  const prefix = "/uploads/avatars/";
+
+  if (!pathname.startsWith(prefix)) {
+    return null;
+  }
+
+  const rawFileName = pathname.slice(prefix.length);
+
+  if (rawFileName === "" || rawFileName.includes("/")) {
+    return null;
+  }
+
+  let fileName;
+
+  try {
+    fileName = decodeURIComponent(rawFileName);
+  } catch {
+    return null;
+  }
+
+  if (!AVATAR_FILE_NAME_PATTERN.test(fileName)) {
+    return null;
+  }
+
+  return fileName;
+};
+
+// Resolve the Better Auth user record for the verified token identity
+const findAuthenticatedUser = async (req) => {
+  const userId = req.user?.id;
+  const email =
+    typeof req.user?.email === "string" ? req.user.email.toLowerCase() : "";
+
+  if (!userId || !email || !ObjectId.isValid(userId)) {
+    return null;
+  }
+
+  const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+
+  if (!user) {
+    return null;
+  }
+
+  // The stored record must belong to the identity carried by the token.
+  if (typeof user.email !== "string" || user.email.toLowerCase() !== email) {
+    return null;
+  }
+
+  return user;
+};
+
 // Home Route
 app.get("/", (req, res) => {
   res.send("Hello Kindora!");
+});
+
+// Upload a profile avatar (base64 data URL) and return its public URL
+app.post("/profile/avatar", verifyJWT, async (req, res) => {
+  try {
+    const user = await findAuthenticatedUser(req);
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Authenticated user not found",
+      });
+    }
+
+    const parsedAvatar = parseAvatarDataUrl(req.body?.image);
+
+    if (!parsedAvatar) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Please provide a valid PNG, JPEG or WebP image under 2MB",
+      });
+    }
+
+    const fileName = `${randomUUID()}.${parsedAvatar.extension}`;
+    const filePath = path.join(UPLOADS_ROOT, fileName);
+
+    await fs.writeFile(filePath, parsedAvatar.buffer);
+
+    try {
+      // Records the owner so the file can be deleted safely later on.
+      await avatarUploadsCollection.insertOne({
+        fileName,
+        userId: user._id.toString(),
+        createdAt: new Date(),
+      });
+    } catch (ownershipError) {
+      // Without the ownership record the file could never be cleaned up,
+      // so the upload must not be reported as successful.
+      console.error("Avatar ownership record error:", ownershipError);
+
+      await fs.unlink(filePath).catch(() => null);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to upload avatar",
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "Avatar uploaded successfully",
+      data: {
+        url: `${req.protocol}://${req.get("host")}/uploads/avatars/${fileName}`,
+        fileName,
+      },
+    });
+  } catch (error) {
+    console.error("Avatar upload error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to upload avatar",
+    });
+  }
+});
+
+// Delete a previously uploaded avatar file that belongs to the caller
+app.post("/profile/avatar/cleanup", verifyJWT, async (req, res) => {
+  try {
+    const user = await findAuthenticatedUser(req);
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Authenticated user not found",
+      });
+    }
+
+    const fileName = getLocalAvatarFileName(req.body?.image);
+
+    if (!fileName) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid avatar file name is required",
+      });
+    }
+
+    const ownerId = user._id.toString();
+
+    // Ownership is proven by the stored upload record, never by the client URL.
+    const ownedUpload = await avatarUploadsCollection.findOne({
+      fileName,
+      userId: ownerId,
+    });
+
+    if (!ownedUpload) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only remove avatars that belong to your profile",
+      });
+    }
+
+    // Re-read the current record right before deleting to narrow the window
+    // in which the profile image could change. This is not an atomic operation:
+    // a concurrent profile update that sets this same file after this check but
+    // before the unlink below would still delete a file that is in use.
+    const currentUser = await findAuthenticatedUser(req);
+
+    if (!currentUser) {
+      return res.status(401).json({
+        success: false,
+        message: "Authenticated user not found",
+      });
+    }
+
+    const currentImage =
+      typeof currentUser.image === "string" ? currentUser.image : "";
+
+    // Compare the parsed URL path instead of the raw string so that
+    // query strings, fragments or look-alike paths cannot fool the check.
+    const currentAvatarFileName = getLocalAvatarFileName(currentImage);
+
+    if (currentAvatarFileName === fileName) {
+      return res.status(409).json({
+        success: false,
+        message: "This avatar is still in use by your profile",
+      });
+    }
+
+    try {
+      await fs.unlink(path.join(UPLOADS_ROOT, fileName));
+    } catch (unlinkError) {
+      // A missing file means the record is stale and can be removed safely.
+      if (unlinkError?.code !== "ENOENT") {
+        console.error("Avatar file deletion error:", unlinkError);
+
+        return res.status(500).json({
+          success: false,
+          message: "Failed to clean up avatar",
+        });
+      }
+    }
+
+    await avatarUploadsCollection.deleteOne({ fileName, userId: ownerId });
+
+    return res.status(200).json({
+      success: true,
+      message: "Avatar removed",
+    });
+  } catch (error) {
+    console.error("Avatar cleanup error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to clean up avatar",
+    });
+  }
 });
 
 // Get Latest Events
@@ -645,7 +992,22 @@ app.delete("/events/:id", verifyJWT, async (req, res) => {
 // Start Server
 async function startServer() {
   try {
+    await fs.mkdir(UPLOADS_ROOT, { recursive: true });
     await connectToMongoDB();
+
+    try {
+      // One ownership record per uploaded avatar file
+      await avatarUploadsCollection.createIndex(
+        { fileName: 1, userId: 1 },
+        { unique: true },
+      );
+
+      console.log("Avatar ownership unique index is ready!");
+    } catch (indexError) {
+      console.error("Avatar ownership index creation failed:", indexError);
+
+      throw indexError;
+    }
 
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);

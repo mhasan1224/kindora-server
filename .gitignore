@@ -16,6 +16,9 @@ pids/
 *.pid
 *.seed
 
+# User uploaded files
+uploads/
+
 # Coverage
 coverage/
 
