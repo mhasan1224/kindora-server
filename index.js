@@ -9,8 +9,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
-const PORT = 8000;
-const FRONTEND_URL = "http://localhost:3000";
+const PORT = Number(process.env.PORT) || 8000;
+
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_ROOT = path.join(__dirname, "uploads", "avatars");
@@ -41,7 +42,13 @@ app.use(
 );
 
 // MongoDB Configuration
-const client = new MongoClient(process.env.MONGO_URI);
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  throw new Error("MONGO_URI environment variable is missing!");
+}
+
+const client = new MongoClient(MONGO_URI);
 const db = client.db("kindora");
 
 const eventsCollection = db.collection("events");
@@ -1019,3 +1026,4 @@ async function startServer() {
 }
 
 startServer();
+export default app
