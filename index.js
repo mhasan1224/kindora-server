@@ -18,11 +18,22 @@ if (!MONGO_URI) {
 
 const app = express();
 
+const allowedOrigins = [
+  "http://localhost:3000",
+  FRONTEND_URL,
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
-  }),
+  })
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -33,6 +44,7 @@ const db = client.db("kindora");
 
 const eventsCollection = db.collection("events");
 const participantsCollection = db.collection("eventParticipants");
+const newsletterCollection = db.collection("newsletterSubscribers");
 
 // Better Auth JWKS
 const JWKS = createRemoteJWKSet(
@@ -55,6 +67,17 @@ export async function connectToMongoDB() {
         );
 
         console.log("Participant unique index is ready!");
+
+        try {
+          await newsletterCollection.createIndex(
+            { email: 1 },
+            { unique: true },
+          );
+
+          console.log("Newsletter email unique index is ready!");
+        } catch (indexError) {
+          console.error("Newsletter index creation failed:", indexError);
+        }
 
         return client;
       })
@@ -137,6 +160,22 @@ const getTodayInDhaka = () => {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
+};
+
+// Email Validation Helpers
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAIL_LENGTH = 254;
+
+const normalizeEmail = (value) => {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+};
+
+const isValidEmail = (email) => {
+  return (
+    email.length > 0 &&
+    email.length <= MAX_EMAIL_LENGTH &&
+    EMAIL_PATTERN.test(email)
+  );
 };
 
 // Validate Event Data
@@ -262,6 +301,59 @@ app.post("/profile/avatar/cleanup", verifyJWT, (req, res) => {
     success: false,
     message: "Local avatar storage is disabled.",
   });
+});
+
+// Newsletter Subscription (public, no authentication required)
+app.post("/newsletter/subscribe", async (req, res) => {
+  try {
+    if (
+      !req.body ||
+      typeof req.body !== "object" ||
+      Array.isArray(req.body)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid email address",
+      });
+    }
+
+    const email = normalizeEmail(req.body.email);
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid email address",
+      });
+    }
+
+    try {
+      await newsletterCollection.insertOne({
+        email,
+        subscribedAt: new Date(),
+      });
+    } catch (insertError) {
+      if (insertError && insertError.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          message: "This email is already subscribed",
+        });
+      }
+
+      throw insertError;
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "You're subscribed to the Kindora newsletter",
+    });
+  } catch (error) {
+    console.error("Newsletter subscribe error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to subscribe. Please try again later.",
+    });
+  }
 });
 
 // Get Latest Events
